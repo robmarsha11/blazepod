@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BlazePod 2-Player Battle</title>
+<style>
+body{font-family:system-ui,sans-serif;padding:1.2rem;max-width:740px;background:#111;color:#f4f4f4}
+.row{display:flex;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap;align-items:center}
+button,select{padding:.65rem 1.1rem;font-size:1rem;font-weight:600;border:none;border-radius:8px;cursor:pointer;color:#fff}
+select{background:#1f2937;border:2px solid #4b5563}
+#connectBtn{background:#4b5563}#startBtn{background:#16a34a}#startBtn:disabled{background:#374151;color:#9ca3af}#stopBtn{background:#dc2626;display:none}
+.grid{display:grid;grid-template-columns:1fr .7fr 1fr;gap:.8rem;margin-bottom:1rem}
+.card{background:#1f2937;padding:.8rem;border-radius:10px;text-align:center;border:3px solid transparent}
+.red-c{border-color:#ef4444;color:#f87171}.blue-c{border-color:#3b82f6;color:#60a5fa}
+.score{font-size:2.5rem;font-weight:800}
+.pods{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem}
+.badge{padding:.35rem .8rem;border-radius:999px;background:#1f2937;border:2px solid #374151;font-size:.85rem}
+.badge.red{background:#7f1d1d;border-color:#ef4444}.badge.blue{background:#1e3a8a;border-color:#3b82f6}
+#banner{font-size:1.2rem;font-weight:800;text-align:center;margin-bottom:.8rem;min-height:1.5rem;color:#facc15}
+pre{background:#1f2937;padding:.7rem;border-radius:8px;height:120px;overflow-y:auto;font-size:.8rem}
+</style>
+</head>
+<body>
+<div style="margin-bottom:.8rem"><a href="index.html" style="color:#38bdf8;text-decoration:none;font-weight:600">&larr; Back to Drill Menu</a></div>
+<h2>BlazePod 2-Player Red vs. Blue</h2>
+<div class="row">
+<button id="connectBtn">+ Connect Pod</button>
+<select id="durSel"><option value="15">15s</option><option value="30">30s</option><option value="45" selected>45s</option><option value="60">60s</option><option value="90">90s</option><option value="120">120s</option></select>
+<button id="startBtn" disabled>Start Battle</button>
+<button id="stopBtn">Stop</button>
+</div>
+<div class="pods" id="podList">Connect at least 2 pods (6 recommended).</div>
+<div id="banner"></div>
+<div class="grid">
+<div class="card red-c"><strong>RED</strong><div class="score" id="redScore">0</div><div id="redAvg">Avg: --</div></div>
+<div class="card"><div>TIME</div><div class="score" id="timeVal">45s</div></div>
+<div class="card blue-c"><strong>BLUE</strong><div class="score" id="blueScore">0</div><div id="blueAvg">Avg: --</div></div>
+</div>
+<pre id="log">Ready. Connect your 6 BlazePods.\n</pre>
+<script>
+const UUIDS={UART_S:'6e400001-b5a3-f393-e0a9-e50e24dcca9e',UART_RX:'6e400002-b5a3-f393-e0a9-e50e24dcca9e',LED_S:'50c97bfa-4cb8-4c84-b745-0e58a0280cd6',LED_C:'50c912a2-4cb8-4c84-b745-0e58a0280cd6',TAP_S:'50c928bd-4cb8-4c84-b745-0e58a0280cd6',TAP_C:'50c9727e-4cb8-4c84-b745-0e58a0280cd6'};
+const C={red:Uint8Array.of(0,0,255,1),blue:Uint8Array.of(0,255,0,1),green:Uint8Array.of(255,0,0,0),off:Uint8Array.of(0,0,0,0)};
+const pods=[],logEl=document.getElementById('log'),durSel=document.getElementById('durSel'),log=m=>{logEl.textContent+=m+'\n';logEl.scrollTop=logEl.scrollHeight};
+let running=false,timer=null,st={rPod:-1,bPod:-1,rAt:0,bAt:0},sc={r:0,b:0,rT:[],bT:[]};
+durSel.onchange=()=>{if(!running)document.getElementById('timeVal').textContent=`${durSel.value}s`};
+const actx=new(window.AudioContext||window.webkitAudioContext)();
+function beep(f,d=.08){if(actx.state==='suspended')actx.resume();const o=actx.createOscillator(),g=actx.createGain();o.frequency.value=f;g.gain.value=.15;o.connect(g);g.connect(actx.destination);o.start();o.stop(actx.currentTime+d)}
+function crc(off,sb){const p=(0xEDB88321+(off%50))>>>0;let c=0xFFFFFFFF;for(let i=0;i<4;i++){c=(c^sb.at(i))>>>0;for(let j=0;j<8;j++)c=(c&1)?((c>>>1)^p)>>>0:(c>>>1)}c=(c^0xFFFFFFFF)>>>0;c=(c+(c<<3))>>>0;c=(c^(c>>>11))>>>0;c=(c+(c<<15))>>>0;return Uint8Array.of(115,101,97,c&255,(c>>>8)&255,(c>>>16)&255,(c>>>24)&255)}
+function render(){if(pods.length)document.getElementById('podList').innerHTML=pods.map((_,i)=>`<div class="badge ${i===st.rPod?'red':i===st.bPod?'blue':''}">Pod ${i+1}</div>`).join('')}
+async function connectPod(){try{const d=await navigator.bluetooth.requestDevice({filters:[{manufacturerData:[{companyIdentifier:0x09D7}]},{services:[UUIDS.UART_S]},{namePrefix:'BlazePod'}],optionalServices:[UUIDS.UART_S,UUIDS.LED_S,UUIDS.TAP_S],optionalManufacturerData:[0x09D7]});if(pods.some(p=>p.d.id===d.id))return log('Already connected.');const idx=pods.length,seed=await new Promise((res,rej)=>{const ac=new AbortController(),t=setTimeout(()=>{ac.abort();rej(new Error('Seed timeout'))},10000);d.addEventListener('advertisementreceived',e=>{for(const[,dv]of e.manufacturerData){const b=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength);if(b.length>=6){clearTimeout(t);ac.abort();res({off:b.at(1),sb:b.slice(2,6)});return}}},{signal:ac.signal});d.watchAdvertisements({signal:ac.signal}).catch(rej)});const s=await d.gatt.connect(),u=await s.getPrimaryService(UUIDS.UART_S);await(await u.getCharacteristic(UUIDS.UART_RX)).writeValue(crc(seed.off,seed.sb));const led=await(await s.getPrimaryService(UUIDS.LED_S)).getCharacteristic(UUIDS.LED_C),tap=await(await s.getPrimaryService(UUIDS.TAP_S)).getCharacteristic(UUIDS.TAP_C);await tap.startNotifications();tap.addEventListener('characteristicvaluechanged',e=>onTap(idx,new Uint8Array(e.target.value.buffer)));await led.writeValue(C.green);setTimeout(()=>led.writeValue(C.off),350);pods.push({d,led});render();if(pods.length>=2)document.getElementById('startBtn').disabled=false;log(`Pod ${idx+1} ready (${pods.length}/6)`)}catch(e){log(`Error: ${e.message}`)}}
+const pick=(a,b)=>{const av=pods.map((_,i)=>i).filter(i=>i!==a&&i!==b);return av.length?av[Math.floor(Math.random()*av.length)]:pods.map((_,i)=>i).find(i=>i!==b)};
+async function spawn(c){if(!running)return;if(c==='red'){st.rPod=pick(st.rPod,st.bPod);st.rAt=performance.now();render();await pods.at(st.rPod).led.writeValue(C.red)}else{st.bPod=pick(st.bPod,st.rPod);st.bAt=performance.now();render();await pods.at(st.bPod).led.writeValue(C.blue)}}
+async function onTap(idx,d){if(!running||d.at(0)===0)return;const ms=d.at(1)|(d.at(2)<<8)|(d.at(3)<<16)|(d.at(4)<<24);if(idx===st.rPod){beep(780);sc.r++;sc.rT.push(ms>0?ms:Math.round(performance.now()-st.rAt));document.getElementById('redScore').textContent=sc.r;document.getElementById('redAvg').textContent=`Avg: ${Math.round(sc.rT.reduce((a,b)=>a+b,0)/sc.rT.length)}ms`;await spawn('red')}else if(idx===st.bPod){beep(1040);sc.b++;sc.bT.push(ms>0?ms:Math.round(performance.now()-st.bAt));document.getElementById('blueScore').textContent=sc.b;document.getElementById('blueAvg').textContent=`Avg: ${Math.round(sc.bT.reduce((a,b)=>a+b,0)/sc.bT.length)}ms`;await spawn('blue')}}
+async function start(){running=true;st={rPod:-1,bPod:-1,rAt:0,bAt:0};sc={r:0,b:0,rT:[],bT:[]};let t=Number(durSel.value);durSel.disabled=true;document.getElementById('banner').textContent='';document.getElementById('redScore').textContent='0';document.getElementById('blueScore').textContent='0';document.getElementById('redAvg').textContent='Avg: --';document.getElementById('blueAvg').textContent='Avg: --';document.getElementById('timeVal').textContent=`${t}s`;document.getElementById('startBtn').style.display='none';document.getElementById('stopBtn').style.display='inline-block';beep(660,.15);await spawn('red');await spawn('blue');timer=setInterval(()=>{t--;document.getElementById('timeVal').textContent=`${t}s`;if(t<=0)stop()},1000)}
+async function stop(){running=false;clearInterval(timer);durSel.disabled=false;st.rPod=-1;st.bPod=-1;render();document.getElementById('startBtn').style.display='inline-block';document.getElementById('stopBtn').style.display='none';beep(440,.35);await Promise.all(pods.map(p=>p.led.writeValue(C.off)));const w=sc.r>sc.b?'RED WINS!':sc.b>sc.r?'BLUE WINS!':'TIE!';document.getElementById('banner').textContent=`${w} (${sc.r} vs ${sc.b})`}
+document.getElementById('connectBtn').onclick=connectPod;document.getElementById('startBtn').onclick=start;document.getElementById('stopBtn').onclick=stop;
+</script>
+</body>
+</html>
